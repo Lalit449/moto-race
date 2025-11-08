@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simple 3D Motorcycle Racing (Road Race)</title>
+  <style>
+    html,body{height:100%;margin:0;overflow:hidden;font-family:Arial,Helvetica,sans-serif}
+    #overlay{position:fixed;left:10px;top:10px;z-index:5;color:#fff}
+    #controls{position:fixed;right:10px;bottom:20px;z-index:5;display:flex;gap:10px}
+    .btn{background:rgba(0,0,0,0.5);color:#fff;padding:12px;border-radius:8px;user-select:none}
+    #touch-left,#touch-right{width:70px;height:70px;display:flex;align-items:center;justify-content:center;font-weight:bold}
+    #canvas-wrap{width:100%;height:100%;background:#000}
+    #message{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:6;color:#fff;background:rgba(0,0,0,0.6);padding:12px;border-radius:8px;display:none}
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div id="speed">Speed: <span id="speedVal">0</span></div>
+    <div id="score">Distance: <span id="scoreVal">0</span> m</div>
+    <div id="instr">Controls: ← / → or touch buttons (mobile)</div>
+  </div>
+  <div id="controls">
+    <div id="touch-left" class="btn">◀</div>
+    <div id="touch-right" class="btn">▶</div>
+  </div>
+  <div id="message">Loading...</div>
+  <div id="canvas-wrap"></div>
+
+  <!-- Three.js from CDN -->
+  <script src="https://unpkg.com/three@0.150.1/build/three.min.js"></script>
+  <script>
+  // Simple 3D motorcycle racing game (single-file)
+  // Drop into an .html file and open in a modern browser.
+
+  const wrap = document.getElementById('canvas-wrap');
+  const msg = document.getElementById('message');
+  const speedVal = document.getElementById('speedVal');
+  const scoreVal = document.getElementById('scoreVal');
+
+  let scene, camera, renderer, clock;
+  let player, road, opponents = [], obstacles = [];
+  let speed = 0, distance = 0;
+  let laneX = [-3, 0, 3]; // three lanes
+  let currentLane = 1;
+  let targetX = laneX[currentLane];
+  let worldSpeed = 0.12; // base speed
+  let running = true;
+
+  init();
+  animate();
+
+  function init(){
+    msg.style.display = 'block';
+    msg.textContent = 'Initializing...';
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x000000, 15, 80);
+
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 200);
+    camera.position.set(0, 5, 12);
+
+    renderer = new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+    wrap.appendChild(renderer.domElement);
+
+    clock = new THREE.Clock();
+
+    // Lights
+    const hemi = new THREE.HemisphereLight(0xffffff,0x444444,1.0);
+    hemi.position.set(0,20,0); scene.add(hemi);
+    const dir = new THREE.DirectionalLight(0xffffff,0.6); dir.position.set(-5,10,5); scene.add(dir);
+
+    // Road (long repeating plane)
+    const roadGeo = new THREE.PlaneGeometry(20,100,1,1);
+    const roadMat = new THREE.MeshStandardMaterial({color:0x222222});
+    road = new THREE.Mesh(roadGeo, roadMat);
+    road.rotation.x = -Math.PI/2;
+    road.position.z = -40; // so we can tile forward
+    scene.add(road);
+
+    // Road markings - simple stripes using thin boxes
+    for(let i=0;i<200;i+=4){
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.5,0.01,2), new THREE.MeshStandardMaterial({color:0xffffff}));
+      stripe.position.set(0,0.01, -i);
+      scene.add(stripe);
+    }
+
+    // Side ground
+    const sideMat = new THREE.MeshStandardMaterial({color:0x1b3b13});
+    const left = new THREE.Mesh(new THREE.BoxGeometry(20,1,200), sideMat);
+    left.rotation.x = -Math.PI/2; left.position.set(-20, -0.5, -50); scene.add(left);
+    const right = left.clone(); right.position.set(20, -0.5, -50); scene.add(right);
+
+    // Player motorcycle (simple group model)
+    player = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.8,0.4,2.2), new THREE.MeshStandardMaterial({color:0xff0000}));
+    body.position.set(0,0.6,0);
+    const seat = new THREE.Mesh(new THREE.BoxGeometry(0.6,0.2,0.8), new THREE.MeshStandardMaterial({color:0x220000})); seat.position.set(0,0.85,-0.2);
+    const frontWheel = new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.3,0.3,12), new THREE.MeshStandardMaterial({color:0x111111})); frontWheel.rotation.z = Math.PI/2; frontWheel.position.set(0,-0.1,1);
+    const backWheel = frontWheel.clone(); backWheel.position.set(0,-0.1,-1);
+    player.add(body, seat, frontWheel, backWheel);
+    player.position.set(0,0,3);
+    scene.add(player);
+
+    // opponents: simple colored boxes that move towards player
+    spawnOpponents(8);
+
+    // obstacles
+    spawnObstacles(6);
+
+    // helpers
+    window.addEventListener('resize', onResize);
+    window.addEventListener('keydown', onKey);
+
+    // touch controls
+    const leftBtn = document.getElementById('touch-left');
+    const rightBtn = document.getElementById('touch-right');
+    leftBtn.addEventListener('touchstart', ()=> moveLeft()); leftBtn.addEventListener('mousedown', ()=> moveLeft());
+    rightBtn.addEventListener('touchstart', ()=> moveRight()); rightBtn.addEventListener('mousedown', ()=> moveRight());
+
+    msg.style.display = 'none';
+  }
+
+  function spawnOpponents(n){
+    for(let i=0;i<n;i++){
+      const g = new THREE.Mesh(new THREE.BoxGeometry(1.2,0.6,2), new THREE.MeshStandardMaterial({color:Math.random()*0xffffff}));
+      const lane = laneX[Math.floor(Math.random()*3)];
+      g.position.set(lane,0.3,-30 - Math.random()*80);
+      scene.add(g); opponents.push(g);
+    }
+  }
+
+  function spawnObstacles(n){
+    for(let i=0;i<n;i++){
+      const ob = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshStandardMaterial({color:0x444444}));
+      const lane = laneX[Math.floor(Math.random()*3)];
+      ob.position.set(lane,0.5,-20 - Math.random()*120);
+      scene.add(ob); obstacles.push(ob);
+    }
+  }
+
+  function onResize(){
+    camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  function onKey(e){
+    if(e.key === 'ArrowLeft' || e.key === 'a') moveLeft();
+    if(e.key === 'ArrowRight' || e.key === 'd') moveRight();
+    if(e.key === ' ') speed = Math.min(speed + 0.05, 1.5);
+  }
+
+  function moveLeft(){ if(currentLane>0){ currentLane--; targetX = laneX[currentLane]; }}
+  function moveRight(){ if(currentLane<laneX.length-1){ currentLane++; targetX = laneX[currentLane]; }}
+
+  function checkCollisions(){
+    const px = player.position.x; const pz = player.position.z;
+    // opponents
+    opponents.forEach(op => {
+      if(Math.abs(op.position.z - pz) < 1.2 && Math.abs(op.position.x - px) < 0.9){
+        // collision: slow down
+        speed = Math.max(speed - 0.6, 0);
+        op.position.z -= 10; // push opponent away to avoid repeated collision
+      }
+    });
+    obstacles.forEach(ob => {
+      if(Math.abs(ob.position.z - pz) < 1.2 && Math.abs(ob.position.x - px) < 0.9){
+        speed = Math.max(speed - 0.9, 0);
+        ob.position.z -= 15;
+      }
+    });
+  }
+
+  function animate(){
+    requestAnimationFrame(animate);
+    const dt = clock.getDelta();
+
+    // smooth lane movement
+    player.position.x += (targetX - player.position.x) * 8 * dt;
+    // simulate tilt
+    player.rotation.z = (targetX - player.position.x) * 0.15;
+
+    // accelerate toward base speed
+    speed += (worldSpeed - speed) * dt * 0.5;
+    const move = (1 + speed*4) * dt * 40; // world movement multiplier
+
+    // move opponents and obstacles toward player to simulate forward motion
+    opponents.forEach(op=>{
+      op.position.z += move * 0.6; // opponents approach
+      if(op.position.z > 8){
+        op.position.z = -120 - Math.random()*80; // recycle far ahead
+        op.position.x = laneX[Math.floor(Math.random()*3)];
+      }
+    });
+    obstacles.forEach(ob=>{
+      ob.position.z += move;
+      if(ob.position.z > 8){ ob.position.z = -200 - Math.random()*200; ob.position.x = laneX[Math.floor(Math.random()*3)]; }
+    });
+
+    // update distance
+    distance += (1 + speed*4) * dt * 8;
+    speedVal.textContent = (Math.round((1+speed*4)*20));
+    scoreVal.textContent = Math.floor(distance);
+
+    // camera follows slightly behind player
+    camera.position.x += (player.position.x - camera.position.x) * 6 * dt;
+    camera.position.z += ((player.position.z + 8) - camera.position.z) * 2 * dt;
+    camera.lookAt(player.position.x, 1.5, player.position.z - 4);
+
+    checkCollisions();
+
+    renderer.render(scene, camera);
+  }
+
+  // Simple resume/pause on tap
+  renderer && renderer.domElement && renderer.domElement.addEventListener('click', ()=>{ running = !running; if(!running) msg.style.display='block'; else msg.style.display='none'; });
+
+  // Touch swipe for lane change (simple)
+  let startX = null;
+  window.addEventListener('touchstart', (e)=>{ if(e.touches[0]) startX = e.touches[0].clientX; });
+  window.addEventListener('touchend', (e)=>{
+    if(startX==null) return;
+    const endX = e.changedTouches[0].clientX;
+    const dx = endX - startX; if(Math.abs(dx) > 40){ if(dx < 0) moveLeft(); else moveRight(); }
+    startX = null;
+  });
+
+  </script>
+</body>
+</html>
